@@ -1,8 +1,8 @@
 export const MENU_CATEGORIES = [
-  "Classic Pizzas",
-  "Vegetarian Pizzas",
-  "Meat Lovers",
-  "Specialty / Gourmet Pizzas",
-  "Sides & Appetizers",
-  "Beverages & Desserts",
+  "classic",
+  "vegetarian",
+  "meat-lovers",
+  "specialty",
+  "sides",
+  "beverages-desserts",
 ];

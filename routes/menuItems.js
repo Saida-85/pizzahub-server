@@ -7,6 +7,20 @@ import { MENU_CATEGORIES } from "../constants/categories.js";
 
 const router = Router();
 
+const FREE_PLAN_LIMIT = 3;
+
+// Treat user text as plain text, not as a regular expression
+const escapeRegex = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+// A Premium plan that has expired counts as Free
+function effectivePlan(vendor) {
+  if (vendor?.subscriptionPlan !== "premium") return "free";
+  if (vendor.subscriptionExpiresAt && new Date(vendor.subscriptionExpiresAt) < new Date()) {
+    return "free";
+  }
+  return "premium";
+}
+
 // Helper to attach vendor details to menu items
 async function attachVendors(items, usersCollection) {
   if (!items.length) return [];
@@ -21,7 +35,14 @@ async function attachVendors(items, usersCollection) {
         { id: { $in: vendorIds } },
       ],
     })
-    .project({ name: 1, businessName: 1, image: 1, subscriptionPlan: 1, id: 1 })
+    .project({
+      name: 1,
+      businessName: 1,
+      image: 1,
+      subscriptionPlan: 1,
+      subscriptionExpiresAt: 1,
+      id: 1,
+    })
     .toArray();
 
   const vendorMap = new Map();
@@ -40,7 +61,7 @@ async function attachVendors(items, usersCollection) {
             name: v.businessName || v.name || "Local Pizzeria",
             ownerName: v.name || "",
             image: v.image || "",
-            subscriptionPlan: v.subscriptionPlan || "free",
+            subscriptionPlan: effectivePlan(v),
           }
         : {
             id: item.vendorId,
@@ -57,18 +78,23 @@ async function attachVendors(items, usersCollection) {
 router.get("/", async (req, res, next) => {
   try {
     const { menuItemsCollection, usersCollection } = await getCollections();
-    const { search = "", category = "", location = "", sort = "" } = req.query;
 
+    const search = String(req.query.search ?? "").trim();
+    const category = String(req.query.category ?? "").trim();
+    const location = String(req.query.location ?? "").trim();
+    const sort = String(req.query.sort ?? "");
+
+    // Only approved items are ever public. Rejected, pending and inactive items never show.
     const filter = { status: "approved" };
 
-    if (search.trim()) {
-      filter.itemName = { $regex: search.trim(), $options: "i" };
+    if (search) {
+      filter.itemName = { $regex: escapeRegex(search), $options: "i" };
     }
-    if (category.trim()) {
-      filter.category = category.trim();
+    if (category && MENU_CATEGORIES.includes(category)) {
+      filter.category = category;
     }
-    if (location.trim()) {
-      filter.location = { $regex: location.trim(), $options: "i" };
+    if (location) {
+      filter.location = { $regex: escapeRegex(location), $options: "i" };
     }
 
     let sortOption = { createdAt: -1 };
@@ -108,7 +134,7 @@ router.get("/vendor/my", verifyJWT, requireRole("vendor"), async (req, res, next
   }
 });
 
-// 3. PUBLIC / AUTH: Get single menu item details
+// 3. PUBLIC: Get single approved menu item details
 router.get("/:id", async (req, res, next) => {
   try {
     const { id } = req.params;
@@ -119,7 +145,8 @@ router.get("/:id", async (req, res, next) => {
     const { menuItemsCollection, usersCollection } = await getCollections();
     const item = await menuItemsCollection.findOne({ _id: new ObjectId(id) });
 
-    if (!item) {
+    // Pending, rejected and inactive items are not visible to the public
+    if (!item || item.status !== "approved") {
       return res.status(404).json({ message: "Menu item not found" });
     }
 
@@ -167,7 +194,7 @@ router.post("/", verifyJWT, requireRole("vendor"), async (req, res, next) => {
         status: { $in: ["pending", "approved"] },
       });
 
-      if (activeCount >= 3) {
+      if (activeCount >= FREE_PLAN_LIMIT) {
         return res.status(403).json({
           message:
             "Free plan allows a maximum of 3 active menu items. Upgrade to Premium for unlimited items.",
@@ -211,6 +238,7 @@ router.patch("/:id", verifyJWT, requireRole("vendor"), async (req, res, next) =>
     if (!existing) {
       return res.status(404).json({ message: "Menu item not found" });
     }
+    // Ownership check: never trust the client, compare with the verified token user
     if (existing.vendorId !== req.user.id) {
       return res.status(403).json({ message: "Forbidden: you can only update your own items" });
     }
@@ -219,8 +247,10 @@ router.patch("/:id", verifyJWT, requireRole("vendor"), async (req, res, next) =>
     const updates = {};
 
     if (itemName !== undefined) {
-      if (!itemName.trim()) return res.status(400).json({ message: "Item name cannot be empty" });
-      updates.itemName = itemName.trim();
+      if (!String(itemName).trim()) {
+        return res.status(400).json({ message: "Item name cannot be empty" });
+      }
+      updates.itemName = String(itemName).trim();
     }
     if (category !== undefined) {
       if (!MENU_CATEGORIES.includes(category)) {
@@ -228,8 +258,18 @@ router.patch("/:id", verifyJWT, requireRole("vendor"), async (req, res, next) =>
       }
       updates.category = category;
     }
-    if (description !== undefined) updates.description = description.trim();
-    if (location !== undefined) updates.location = location.trim();
+    if (description !== undefined) {
+      if (!String(description).trim()) {
+        return res.status(400).json({ message: "Description cannot be empty" });
+      }
+      updates.description = String(description).trim();
+    }
+    if (location !== undefined) {
+      if (!String(location).trim()) {
+        return res.status(400).json({ message: "Location cannot be empty" });
+      }
+      updates.location = String(location).trim();
+    }
     if (price !== undefined) {
       const num = Number(price);
       if (Number.isNaN(num) || num <= 0) {
@@ -239,22 +279,42 @@ router.patch("/:id", verifyJWT, requireRole("vendor"), async (req, res, next) =>
     }
     if (images !== undefined) {
       const list = Array.isArray(images) ? images.filter(Boolean) : [images].filter(Boolean);
-      if (!list.length) return res.status(400).json({ message: "At least one image is required" });
+      if (!list.length) {
+        return res.status(400).json({ message: "At least one image is required" });
+      }
       updates.images = list;
     }
 
     // Vendors may toggle approved <-> inactive, but cannot self-approve pending/rejected items
     if (status !== undefined) {
-      if (
+      const canToggle =
         (existing.status === "approved" && status === "inactive") ||
-        (existing.status === "inactive" && status === "approved")
-      ) {
-        updates.status = status;
-      } else {
+        (existing.status === "inactive" && status === "approved");
+
+      if (!canToggle) {
         return res.status(403).json({
           message: "You can only toggle availability on admin-approved items",
         });
       }
+
+      // Re-activating also counts against the Free plan limit
+      if (status === "approved" && req.user.subscriptionPlan !== "premium") {
+        const active = await menuItemsCollection.countDocuments({
+          vendorId: req.user.id,
+          status: { $in: ["pending", "approved"] },
+        });
+        if (active >= FREE_PLAN_LIMIT) {
+          return res.status(403).json({
+            message: "Free plan allows a maximum of 3 active menu items. Upgrade to Premium.",
+          });
+        }
+      }
+
+      updates.status = status;
+    }
+
+    if (Object.keys(updates).length === 0) {
+      return res.status(400).json({ message: "Nothing to update" });
     }
 
     await menuItemsCollection.updateOne({ _id: new ObjectId(id) }, { $set: updates });
