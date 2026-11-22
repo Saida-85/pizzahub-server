@@ -187,7 +187,7 @@ router.patch("/:id/cancel", verifyJWT, requireRole("customer"), async (req, res,
 
     await ordersCollection.updateOne(
       { _id: new ObjectId(id) },
-      { $set: { status: "cancelled" } }
+      { $set: { status: "cancelled", statusUpdatedAt: new Date() } }
     );
 
     return res.json({ message: "Order cancelled successfully" });
@@ -242,7 +242,7 @@ router.patch("/:id/status", verifyJWT, requireRole("vendor"), async (req, res, n
 
     await ordersCollection.updateOne(
       { _id: new ObjectId(id) },
-      { $set: { status } }
+      { $set: { status, statusUpdatedAt: new Date() } }
     );
 
     return res.json({ message: `Order ${status}`, status });
