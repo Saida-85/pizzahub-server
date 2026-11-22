@@ -1,15 +1,41 @@
 import { Router, raw } from "express";
 import Stripe from "stripe";
 import { ObjectId } from "mongodb";
-import dotenv from "dotenv";
 import { getCollections } from "../config/db.js";
-
-dotenv.config();
 
 const router = Router();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
-// POST /api/webhook — Stripe webhook endpoint (raw body required)
+const PREMIUM_DAYS = 30;
+
+function userFilter(vendorId) {
+  return ObjectId.isValid(vendorId)
+    ? { $or: [{ _id: new ObjectId(vendorId) }, { id: vendorId }] }
+    : { $or: [{ id: vendorId }, { _id: vendorId }] };
+}
+
+function buildTransaction(session, status) {
+  return {
+    vendorId: String(session.metadata?.vendorId),
+    plan: session.metadata?.plan || "premium",
+    amount: typeof session.amount_total === "number" ? session.amount_total / 100 : 0,
+    currency: (session.currency || "usd").toLowerCase(),
+    stripeSessionId: session.id,
+    stripeSubscriptionId: session.subscription ? String(session.subscription) : null,
+    status,
+    createdAt: new Date(),
+  };
+}
+
+// Records an unsuccessful payment, but never overwrites a paid one.
+async function recordFailed(transactionsCollection, session) {
+  if (!session.metadata?.vendorId) return;
+  const existing = await transactionsCollection.findOne({ stripeSessionId: session.id });
+  if (existing) return;
+  await transactionsCollection.insertOne(buildTransaction(session, "failed"));
+}
+
+// POST /api/webhook: Stripe webhook endpoint (raw body required)
 router.post("/", raw({ type: "application/json" }), async (req, res) => {
   const sig = req.headers["stripe-signature"];
 
@@ -20,11 +46,7 @@ router.post("/", raw({ type: "application/json" }), async (req, res) => {
 
   let event;
   try {
-    event = stripe.webhooks.constructEvent(
-      req.body,
-      sig,
-      process.env.STRIPE_WEBHOOK_SECRET
-    );
+    event = stripe.webhooks.constructEvent(req.body, sig, process.env.STRIPE_WEBHOOK_SECRET);
   } catch (err) {
     console.error("Webhook signature verification failed:", err.message);
     return res.status(400).send(`Webhook Error: ${err.message}`);
@@ -32,48 +54,48 @@ router.post("/", raw({ type: "application/json" }), async (req, res) => {
 
   try {
     const { usersCollection, transactionsCollection } = await getCollections();
+    const session = event.data.object;
 
-    if (event.type === "checkout.session.completed") {
-      const session = event.data.object;
-      const vendorId = session.metadata?.vendorId;
-      const plan = session.metadata?.plan || "premium";
+    switch (event.type) {
+      case "checkout.session.completed": {
+        const vendorId = session.metadata?.vendorId;
+        // Only a verified, paid session may activate Premium.
+        if (!vendorId || session.payment_status !== "paid") break;
 
-      if (vendorId && session.payment_status === "paid") {
-        // Prevent duplicate transaction records if Stripe retries the event
-        const existingTx = await transactionsCollection.findOne({
-          stripeSessionId: session.id,
-        });
+        const existing = await transactionsCollection.findOne({ stripeSessionId: session.id });
+        if (existing?.status === "succeeded") break; // Stripe retry: already processed
 
-        if (!existingTx) {
-          const amount =
-            typeof session.amount_total === "number" ? session.amount_total / 100 : 0;
-
-          await transactionsCollection.insertOne({
-            vendorId: String(vendorId),
-            plan,
-            amount,
-            currency: (session.currency || "usd").toLowerCase(),
-            stripeSessionId: session.id,
-            stripeSubscriptionId: session.subscription ? String(session.subscription) : null,
-            status: "succeeded",
-            createdAt: new Date(),
-          });
+        if (existing) {
+          await transactionsCollection.updateOne(
+            { _id: existing._id },
+            { $set: { status: "succeeded" } }
+          );
+        } else {
+          await transactionsCollection.insertOne(buildTransaction(session, "succeeded"));
         }
 
-        const expiresAt = new Date();
-        expiresAt.setDate(expiresAt.getDate() + 30);
+        // Extend from the current expiry if the vendor is still Premium.
+        const vendor = await usersCollection.findOne(userFilter(vendorId));
+        const now = new Date();
+        const current = vendor?.subscriptionExpiresAt ? new Date(vendor.subscriptionExpiresAt) : null;
+        const base = current && current > now ? current : now;
+        const expiresAt = new Date(base);
+        expiresAt.setDate(expiresAt.getDate() + PREMIUM_DAYS);
 
-        const userFilter = ObjectId.isValid(vendorId)
-          ? { $or: [{ _id: new ObjectId(vendorId) }, { id: vendorId }] }
-          : { $or: [{ id: vendorId }, { _id: vendorId }] };
-
-        await usersCollection.updateOne(userFilter, {
-          $set: {
-            subscriptionPlan: "premium",
-            subscriptionExpiresAt: expiresAt,
-          },
+        await usersCollection.updateOne(userFilter(vendorId), {
+          $set: { subscriptionPlan: "premium", subscriptionExpiresAt: expiresAt },
         });
+        break;
       }
+
+      case "checkout.session.async_payment_failed":
+      case "checkout.session.expired":
+        await recordFailed(transactionsCollection, session);
+        break;
+
+      default:
+        // Other events are acknowledged and ignored.
+        break;
     }
 
     return res.status(200).json({ received: true });
