@@ -1,7 +1,7 @@
 import "dotenv/config";
+import dns from "node:dns";
 import express from "express";
 import cors from "cors";
-import dotenv from "dotenv";
 import { connectDB } from "./config/db.js";
 import webhookRouter from "./routes/webhook.js";
 import menuItemsRouter from "./routes/menuItems.js";
@@ -12,16 +12,18 @@ import paymentsRouter from "./routes/payments.js";
 import uploadRouter from "./routes/upload.js";
 import favoritesRouter from "./routes/favorites.js";
 
-dotenv.config();
+// Fix local ISP/router DNS refusing MongoDB Atlas SRV lookups
+dns.setServers(["8.8.8.8", "1.1.1.1"]);
 
 const app = express();
 const PORT = process.env.PORT || 5000;
+const allowedOrigin = (process.env.CLIENT_URL || "http://localhost:3000").replace(/\/$/, "");
 
 await connectDB();
 
 app.use(
   cors({
-    origin: process.env.CLIENT_URL || "http://localhost:3000",
+    origin: allowedOrigin,
     credentials: true,
   })
 );
