@@ -97,6 +97,32 @@ router.post("/", verifyJWT, requireRole("customer"), async (req, res, next) => {
       return res.status(400).json({ message: "Delivery address is required" });
     }
 
+    // Validate the delivery date on the server (YYYY-MM-DD, a real date, not in the past).
+    // One day of tolerance covers the gap between UTC and the customer's local time.
+    const dateText = String(deliveryDate).trim();
+    const parsedDate = /^\d{4}-\d{2}-\d{2}$/.test(dateText)
+      ? new Date(`${dateText}T00:00:00.000Z`)
+      : null;
+    if (!parsedDate || Number.isNaN(parsedDate.getTime())) {
+      return res.status(400).json({ message: "Delivery date must be a valid date (YYYY-MM-DD)" });
+    }
+    const earliest = new Date();
+    earliest.setUTCDate(earliest.getUTCDate() - 1);
+    earliest.setUTCHours(0, 0, 0, 0);
+    if (parsedDate < earliest) {
+      return res.status(400).json({ message: "Delivery date cannot be in the past" });
+    }
+
+    const addressText = String(deliveryAddress).trim();
+    if (addressText.length < 10 || addressText.length > 300) {
+      return res
+        .status(400)
+        .json({ message: "Delivery address must be between 10 and 300 characters" });
+    }
+    if (String(message || "").length > 500) {
+      return res.status(400).json({ message: "Message must be 500 characters or fewer" });
+    }
+
     const { menuItemsCollection, ordersCollection } = await getCollections();
     const item = await menuItemsCollection.findOne({ _id: new ObjectId(itemId) });
 
