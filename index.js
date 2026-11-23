@@ -12,8 +12,11 @@ import paymentsRouter from "./routes/payments.js";
 import uploadRouter from "./routes/upload.js";
 import favoritesRouter from "./routes/favorites.js";
 
-// Fix local ISP/router DNS refusing MongoDB Atlas SRV lookups
-dns.setServers(["8.8.8.8", "1.1.1.1"]);
+// Local-only workaround: some ISP/router DNS servers refuse MongoDB Atlas SRV
+// lookups. Never override DNS on the production host (Render).
+if (process.env.NODE_ENV !== "production") {
+  dns.setServers(["8.8.8.8", "1.1.1.1"]);
+}
 
 const app = express();
 const PORT = process.env.PORT || 5000;
