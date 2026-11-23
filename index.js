@@ -10,6 +10,7 @@ import vendorRouter from "./routes/vendor.js";
 import adminRouter from "./routes/admin.js";
 import paymentsRouter from "./routes/payments.js";
 import uploadRouter from "./routes/upload.js";
+import favoritesRouter from "./routes/favorites.js";
 
 dotenv.config();
 
@@ -40,6 +41,12 @@ app.use("/api/vendor", vendorRouter);
 app.use("/api/admin", adminRouter);
 app.use("/api/payments", paymentsRouter);
 app.use("/api/upload", uploadRouter);
+app.use("/api/favorites", favoritesRouter);
+
+// Unknown routes return JSON instead of the default HTML 404 page
+app.use((req, res) => {
+  res.status(404).json({ message: "Route not found" });
+});
 
 // Central error handler
 app.use((err, req, res, next) => {
